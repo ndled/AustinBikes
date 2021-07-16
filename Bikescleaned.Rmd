@@ -1,0 +1,686 @@
+---
+title: "Austin Bike Data Exploration"
+output: html_notebook
+---
+
+Data set and description can be found [here](https://data.austintexas.gov/Transportation-and-Mobility/Austin-MetroBike-Trips/tyfh-5r8s)
+
+# Libraries I might use
+
+```{r}
+library(ISLR)
+library(tidyverse)
+library(randomForest)
+library(gbm)
+library(MASS)
+library(lubridate)
+library(zoo)
+library(GGally)
+library(e1071) #SVM and NB library
+```
+
+# Loading in the Data
+
+```{r}
+bikedata = read.csv("Austin_MetroBike_Trips.csv")
+weatherdata = read.csv("austindaily.csv")
+```
+
+```{r}
+bikedata
+```
+```{r}
+weatherdata
+```
+
+
+# Data Cleaning
+
+## Weather Data
+```{r}
+weatherclean = filter(weatherdata, year(X1938.06.01)>2012)
+weatherclean = weatherclean[,c(1,2)]
+colnames(weatherclean) <- c("Date","AvgTemp")
+weatherclean$Date = as.Date(strptime(weatherclean$Date, format = '%Y-%m-%d'))
+```
+
+```{r}
+summary(weatherclean)
+```
+But we can see we have 80 dates with missing temperature values. I would like to impute an average around it, but is that a sound strategy?
+
+```{r}
+set.seed(123)
+weathercleannn=na.omit(weatherclean)
+fakeweather = weathercleannn
+nas = sample (1:nrow(weathercleannn), nrow(weathercleannn)*0.02934703) # The same rate of missing values as in our original data set
+fakeweather$AvgTemp[nas] <- NA
+fakeweather$AvgTemp = (na.locf(fakeweather$AvgTemp) + rev(na.locf(rev(fakeweather$AvgTemp))))/2 # Fills in missing values with the average of the weather values on either side
+mean((weathercleannn$AvgTemp[nas]-fakeweather$AvgTemp[nas])^2)
+```
+
+Great! We are in a reasonable range of the true temperature and can apply this method to our dataset.
+
+```{r}
+weatherclean$AvgTemp = (na.locf(weatherclean$AvgTemp) + rev(na.locf(rev(weatherclean$AvgTemp))))/2
+```
+
+```{r}
+weatherclean
+```
+
+
+## Bike data
+```{r}
+bikeclean = bikedata[,c(2,4,5,7,9,10)]
+bikeclean[bikeclean==""] <- NA
+bikeclean$Checkout.Time=hms(bikeclean$Checkout.Time)
+bikeclean$Checkout.Date = as.Date(bikeclean$Checkout.Date,format='%m/%d/%Y')
+```
+
+```{r}
+summary((bikeclean))
+```
+
+### Checkout Kiosk
+
+```{r}
+sort(unique(bikeclean$Checkout.Kiosk))
+```
+Oh no, we have a lot of cleaning to do here
+
+```{r}
+tmp = tolower(bikeclean$Checkout.Kiosk)
+tmp = gsub("\\.", " ",tmp)
+tmp = gsub("&", "/",tmp)
+tmp = gsub("street", "",tmp)
+tmp = gsub(" st ", "",tmp)
+tmp = gsub(" at ", "@",tmp)
+tmp = gsub("@", "/",tmp)
+tmp = gsub(" ", "",tmp)
+```
+
+```{r}
+tmp = data.frame(tmp)
+tmp = separate(data = tmp, col = 1, into = c("1st","2nd","3rd","4th"), sep = "[^[:alnum:]]+")
+tmp[is.na(tmp)] <- "ZZZZZ" # Sort doesn't like NA values, so I'm replacing with ZZZZ to go to the end of the row
+tmp = data.frame(t(apply(tmp,1,sort))) # Sorts by row
+tmp = unite(tmp, united, sep="/")
+tmp = gsub("/ZZZZZ", "",tmp$united)
+```
+
+```{r}
+tmp = gsub("3rd/theconventioncenter/trinity","3rd/conventioncenter/trinity",tmp)
+tmp = gsub("slamar","southlamar",tmp)
+tmp = gsub("bartonsprings/kinneyave","bartonsprings/kinney",tmp)
+tmp = gsub("branding/re","rebranding",tmp)
+tmp = gsub("guadalupe/op/universityco/westmall","guadalupe/utwestmall",tmp)
+tmp = gsub("east6th/roberttmartinez","east6th/robertmartinez",tmp)
+```
+
+```{r}
+bikeclean$Checkout.Kiosk = tmp
+```
+
+
+### Return Kiosk
+
+```{r}
+tmp = tolower(bikeclean$Return.Kiosk)
+tmp = gsub("\\.", " ",tmp)
+tmp = gsub("&", "/",tmp)
+tmp = gsub("street", "",tmp)
+tmp = gsub(" st ", "",tmp)
+tmp = gsub(" at ", "@",tmp)
+tmp = gsub("@", "/",tmp)
+tmp = gsub(" ", "",tmp)
+```
+
+```{r}
+tmp = data.frame(tmp)
+tmp = separate(data = tmp, col = 1, into = c("1st","2nd","3rd","4th"), sep = "[^[:alnum:]]+")
+tmp[is.na(tmp)] <- "ZZZZZ" # Sort doesn't like NA values, so I'm replacing with ZZZZ to go to the end of the row
+tmp = data.frame(t(apply(tmp,1,sort))) # Sorts by row
+tmp = unite(tmp, united, sep="/")
+tmp = gsub("/ZZZZZ", "",tmp$united)
+```
+
+```{r}
+tmp = gsub("3rd/theconventioncenter/trinity","3rd/conventioncenter/trinity",tmp)
+tmp = gsub("slamar","southlamar",tmp)
+tmp = gsub("bartonsprings/kinneyave","bartonsprings/kinney",tmp)
+tmp = gsub("branding/re","rebranding",tmp)
+tmp = gsub("guadalupe/op/universityco/westmall","guadalupe/utwestmall",tmp)
+tmp = gsub("east6th/roberttmartinez","east6th/robertmartinez",tmp)
+```
+
+Let's compare the drop off and pickup groups to see if we need to recode anything.
+
+```{r}
+comparison =  data.frame(sort(unique(tmp)),c(sort(unique(bikeclean$Checkout.Kiosk)), NA, NA, NA,NA))
+colnames(comparison) <- c("Return", "Checkout")
+```
+
+```{r}
+comparison$Return[!comparison$Return %in% comparison$Checkout]
+comparison$Checkout[!comparison$Checkout %in% comparison$Return]
+```
+Mainshop should be recoded to shop
+
+
+```{r}
+tmp = gsub("mainshop","shop",tmp)
+bikeclean$Return.Kiosk = tmp
+```
+
+
+
+### Membership types
+
+I want to encode these as the following:
+
+*Single Trip*
+
+"$1 Pay by Trip Fall Special","Single Trip","Try Before You Buy Special","$1 Pay by Trip Winter Special","RideScout Single Ride","Single Trip ","Single Trip Ride", "Pay-as-you-ride","Single Trip (Pay-as-you-ride)","24-Hour Kiosk (Austin B-cycle)","24 Hour Walk Up Pass","Walk Up"
+
+*Daily*
+
+"24-Hour-Online (Austin B-cycle)","24-Hour Membership (Austin B-cycle)","Explorer","Explorer ($8 plus tax)"
+
+*3-Day*
+
+"3-Day Explorer","Weekender","3-Day Weekender","Weekender ($15 plus tax)"
+
+*Weekly*
+
+"7-Day",7-Day Membership (Austin B-cycle),"7-Day Membership (Austin B-cycle)"
+
+*Monthly*
+
+"Local30 ($11 plus tax)","Local30","Local31"
+
+*Annual*
+
+"Annual ","Annual Membership ","Annual Pass","Annual Plus","Local365","Local365 ($80 plus tax)","Local365 Youth (age 13-17 riders)- 1/2,"Local365+Guest Pass","Annual","Annual Member","Annual Membership","Annual Membership (Austin B-cycle)","Annual Pass (30 minute)","Annual Plus Membership","Local365- 1/2 off Anniversary Special","Local365 Youth (age 13-17 riders)",Special" "Local365 Youth with helmet (age 13-17 riders)","Local365+Guest Pass- 1/2 off Anniversary Special","Membership: pay once  one-year commitment"
+
+*Student*
+
+"HT Ram Membership","Semester Membership","UT Student Membership","Semester Membership (Austin B-cycle)","U.T. Student Membership","U.T. Student Membership"
+
+*Event*
+
+"ACL 2019 Pass","ACL Weekend Pass Special (Austin B-cycle)","FunFunFun Fest 3 Day Pass"
+
+*Share*
+
+"Annual (Broward B-cycle)","Annual (Denver B-cycle)","Annual (Kansas City B-cycle)","Annual (Nashville B-cycle)","Annual (San Antonio B-cycle)","Annual Member (Houston B-cycle)","Annual Membership (Charlotte B-cycle)","Annual Membership (GREENbike)","Denver B-cycle Founder","Heartland Pass (Annual Pay)","Madtown Monthly","Republic Rider","Annual (Cincy Red Bike)","Annual (Omaha B-cycle)","Annual (Madison B-cycle)","Annual (Denver Bike Sharing)","Annual Membership (Fort Worth Bike Sharing)","Heartland Pass (Monthly Pay)","Republic Rider (Annual)"
+
+*Other*
+"Aluminum Access","Founding Member (Austin B-cycle)","Founding Member"
+
+*Missing*
+NA, "PROHIBITED", "RESTRICTED"
+
+
+
+```{r}
+bikeclean$Membership.Type[is.na(bikeclean$Membership.Type)] = "missing"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type %in% c("PROHIBITED", "RESTRICTED"))]="missing"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type %in% c("3-Day Explorer","Weekender","3-Day Weekender","Weekender ($15 plus tax)"))]="3 Day"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type %in% c("$1 Pay by Trip Fall Special","Single Trip","Try Before You Buy Special","$1 Pay by Trip Winter Special","RideScout Single Ride","Single Trip ","Single Trip Ride", "Pay-as-you-ride","Single Trip (Pay-as-you-ride)","24-Hour Kiosk (Austin B-cycle)", "24 Hour Walk Up Pass","Walk Up"))]="Single Trip"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type %in% c("24-Hour-Online (Austin B-cycle)","24-Hour Membership (Austin B-cycle)","Explorer","Explorer ($8 plus tax)"))]="Daily"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type%in%c("7-Day","7-Day Membership (Austin B-cycle)","7-Day Membership (Austin B-cycle)"))]="Weekly"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type%in%c("Local30 ($11 plus tax)","Local30","Local31"))]="Monthly"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type%in%c("Annual ","Annual Membership ","Annual Pass","Annual Plus","Local365","Local365 ($80 plus tax)","Local365 Youth (age 13-17 riders)- 1/2" ,"Local365+Guest Pass","Annual","Annual Member","Annual Membership","Annual Membership (Austin B-cycle)","Annual Pass (30 minute)","Annual Plus Membership","Local365- 1/2 off Anniversary Special","Local365 Youth (age 13-17 riders)", "Local365 Youth with helmet (age 13-17 riders)","Local365+Guest Pass- 1/2 off Anniversary Special","Membership: pay once  one-year commitment","Local365 Youth (age 13-17 riders)- 1/2 off Special"))]="Annual"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type%in%c("HT Ram Membership","Semester Membership","UT Student Membership","Semester Membership (Austin B-cycle)","U.T. Student Membership","U.T. Student Membership"))]="Student"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type%in%c("ACL 2019 Pass","ACL Weekend Pass Special (Austin B-cycle)","FunFunFun Fest 3 Day Pass"))]="Event"
+bikeclean$Membership.Type[which(bikeclean$Membership.Type%in%c("Aluminum Access","Founding Member (Austin B-cycle)","Founding Member"))]="Other"
+
+bikeclean$Membership.Type[which(bikeclean$Membership.Type%in%c("Annual (Broward B-cycle)","Annual (Denver B-cycle)","Annual (Kansas City B-cycle)","Annual (Nashville B-cycle)","Annual (San Antonio B-cycle)","Annual Member (Houston B-cycle)","Annual Membership (Charlotte B-cycle)","Annual Membership (GREENbike)","Denver B-cycle Founder","Heartland Pass (Annual Pay)","Madtown Monthly","Republic Rider","Annual (Cincy Red Bike)","Annual (Omaha B-cycle)","Annual (Madison B-cycle)","Annual (Denver Bike Sharing)","Annual Membership (Fort Worth Bike Sharing)","Heartland Pass (Monthly Pay)","Republic Rider (Annual)", "Annual Membership (Indy - Pacers Bikeshare )", "Annual (Boulder B-cycle)"))]="Share"
+```
+
+```{r}
+sort(unique(bikeclean$Membership.Type))
+```
+Looking good! I might try and predict our missing membership types if I have time.
+
+## Merging our Datasets
+
+```{r}
+merged = merge(bikeclean,weatherclean,by.x = "Checkout.Date",by.y ="Date")
+```
+
+```{r}
+saveRDS(merged,file = 'merged.rds')
+```
+Now I don't have to run everything above this EVERY time I need to start over.
+
+```{r}
+merged = readRDS("merged.rds")
+merged$Membership.Type=factor(merged$Membership.Type)
+```
+
+
+# Data visualization
+
+
+```{r}
+ggplot(merged)+
+  geom_point(aes(x = Checkout.Date, y=round(Trip.Duration.Minutes/60)))+
+  geom_hline(yintercept=1,color = "red")
+```
+
+Trips are expected to be at 1 hour in length. Any more than that and there is a fine associated with each minute over you ride. as time has gone on, more people aren't checking their bikes in on time. 
+
+I wonder what's up with the weird gaps in 2016.
+
+```{r}
+ggplot(merged[which(year(merged$Checkout.Date)==2016),])+
+    geom_point(aes(x = Checkout.Date, y=round(Trip.Duration.Minutes/60)))
+```
+```{r}
+ggplot(merged[which(year(merged$Checkout.Date)==2016 & month(merged$Checkout.Date)==4),])+
+      geom_point(aes(x = Checkout.Date, y=round(Trip.Duration.Minutes/60)))
+```
+
+```{r}
+merged[which(year(merged$Checkout.Date)==2016 & month(merged$Checkout.Date)==4),]
+```
+Great, no data for that month.
+
+
+```{r}
+merged[which(year(merged$Checkout.Date)==2016 & month(merged$Checkout.Date)==12),]
+```
+Same with December.
+
+```{r}
+ggplot(merged)+
+  geom_bar(aes(x=factor(month(Checkout.Date))), fill = "blue")+
+  facet_wrap(~year(Checkout.Date))
+```
+We can see there is a cyclical nature to the number of trips taken per month. Intuitively, there are more riders when the weather is nice.
+```{r}
+summary(merged$AvgTemp)
+```
+
+```{r}
+ggplot(merged)+
+  geom_histogram(aes(x= AvgTemp), bins = 45, fill = "blue")
+```
+
+Most people ride between and 12 and 32 degrees Celsius
+
+
+```{r}
+merged %>% 
+  group_by(Checkout.Kiosk) %>%
+  summarise(Departing_Bikes = length(Checkout.Kiosk)) %>% arrange(.,desc(Departing_Bikes))
+```
+
+
+```{r}
+merged %>%
+  ggplot() +
+  geom_bar(aes(x=Checkout.Kiosk), fill = "red")+
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())
+```
+Bikes leave the campus Speedway at a very high rate
+
+```{r}
+merged %>%
+  ggplot() +
+  geom_bar(aes(x=Return.Kiosk), fill = "blue")+
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())
+```
+
+```{r}
+merged %>% 
+  group_by(Return.Kiosk) %>%
+  summarise(Departing_Bikes = length(Return.Kiosk)) %>% arrange(.,desc(Departing_Bikes))
+```
+
+Even more are returned there
+
+
+# Daily Differential Requiring Human Intervention
+
+```{r}
+checkout = merged %>% group_by(Checkout.Date, Checkout.Kiosk) %>% tally() %>% spread(Checkout.Date, n)
+checkout = checkout[-which(checkout$Checkout.Kiosk == "eeyore/s2018"),]
+return = merged %>% group_by(Checkout.Date, Return.Kiosk) %>% tally() %>% spread(Checkout.Date, n)
+return = return[-which(!return$Return.Kiosk %in% checkout$Checkout.Kiosk),]
+checkout[is.na(checkout)] = 0 
+return[is.na(return)]= 0
+```
+
+```{r}
+diff = data.frame(return$Return.Kiosk,return[,-1]-checkout[,-1])
+```
+
+```{r}
+diff
+```
+
+
+
+```{r}
+daily_diff = data.frame(colSums(abs(diff[,-1])))
+daily_diff <- rownames_to_column(daily_diff, "Date")
+daily_diff$Date = gsub( "X", "", daily_diff$Date)
+daily_diff$Date = as.Date(strptime(daily_diff$Date, format = '%Y.%m.%d'))
+colnames(daily_diff) = c("Date","Diff")
+```
+
+```{r}
+daily_diff
+```
+
+
+```{r}
+ggplot(daily_diff)+
+  geom_bar(aes(x=Date, y = Diff), stat = "identity")
+```
+```{r}
+daily_diff = merge(daily_diff,weatherclean,by.x = "Date",by.y ="Date")
+daily_diff$month = month(daily_diff$Date)
+```
+
+```{r}
+xgrid = seq(-10,50,.001)
+ggplot(daily_diff) +
+  geom_point(aes(x = AvgTemp, y = Diff, color =factor(month(Date))))
+```
+This seems like one of those things we would want to predict so that we can know staffing levels. Let's try to predict it with a random forest.
+
+## Random Forest
+
+```{r}
+head(daily_diff)
+```
+
+
+```{r}
+set.seed(123)
+train = sample (1:nrow(daily_diff), nrow(daily_diff)/2)
+```
+
+
+```{r}
+rf.dd= randomForest(Diff ~ Date + AvgTemp,data=daily_diff, subset=train)
+yhat.rf = predict(rf.dd ,newdata=daily_diff[- train ,])
+mean((yhat.rf-daily_diff[-train, "Diff"])^2)
+```
+
+```{r}
+ggplot()+
+  geom_point(aes(x=daily_diff$Diff[-train],y = yhat.rf))+
+  geom_abline(color = "red")
+```
+
+
+
+
+
+```{r}
+summary(daily_diff)
+```
+Not terrible, but there are some areas where the model gets it pretty wrong
+
+Let's try boosting
+
+```{r}
+set.seed(12)
+boost.dd=gbm(Diff~AvgTemp+month(Date)+year(Date)+day(Date),data=daily_diff[train ,], distribution="gaussian",n.trees=5000, shrinkage = .01,interaction.depth = 3)
+```
+
+```{r}
+best.iter <- gbm.perf(boost.dd, method = "OOB", plot = FALSE)
+yhat.boost=predict (boost.dd ,newdata =daily_diff[-train ,], n.trees=best.iter)
+mean((yhat.boost-daily_diff[-train, "Diff"])^2)
+```
+```{r}
+ggplot()+
+  geom_point(aes(x=daily_diff$Diff[-train],y = yhat.boost))+
+  geom_abline(color = "red")
+```
+
+
+```{r}
+daily_diff[daily_diff$Diff>300, 'Date']
+```
+
+## ANN Try
+
+```{r}
+library(neuralnet)
+library(NeuralNetTools)
+```
+
+```{r}
+daily_diff$year = year(daily_diff$Date)
+daily_diff$day = day(daily_diff$Date)
+dd.scaled <- as.data.frame(scale(daily_diff[,-1]))
+min.diff <- min(daily_diff$Diff)
+max.diff <- max(daily_diff$Diff)
+```
+
+```{r}
+dd.scaled
+```
+
+```{r}
+dd.scaled$Diff <- scale(daily_diff$Diff, center = min.diff, scale = max.diff - min.diff)
+```
+
+```{r}
+dd.split <- sample(dim(daily_diff)[1],dim(daily_diff)[1]/2 )
+# Train-test split
+dd.train.scaled <- dd.scaled[dd.split, ]
+dd.test.scaled <- dd.scaled[-dd.split, ]
+```
+
+```{r}
+generate.full.fmla<- function(df, response){
+  names(df)[!(names(df) == response)]%>%
+    paste(.,collapse = "+")%>%
+     paste(response, "~", .)%>%
+    formula(.)
+}
+dd.nn.fmla <- generate.full.fmla(dd.train.scaled, "Diff")
+dd.nn.5.3 <- neuralnet(dd.nn.fmla
+                           , data=dd.train.scaled
+                           , hidden=c(5,3)
+                           , linear.output=TRUE)
+dd.nn.8 <- neuralnet(dd.nn.fmla
+                           , data=dd.train.scaled
+                           , hidden=8
+                           , linear.output=TRUE)
+rf.dd= randomForest(dd.nn.fmla,data=dd.train.scaled)
+
+```
+
+```{r}
+fitness.measures <- function(test, model, response){
+  data.frame(y = test[, response], yhat = predict(model, newdata = test))%>%
+    summarize(MSE = sum((y-yhat)^2)/n(), MAD = sum(abs(y - yhat))/n())%>%
+    mutate(RMSE = sqrt(MSE))
+}
+```
+
+```{r}
+fitness.measures(dd.test.scaled, dd.nn.5.3, "Diff")
+fitness.measures(dd.test.scaled, dd.nn.8, "Diff")
+fitness.measures(dd.test.scaled, rf.dd, "Diff")
+```
+
+```{r}
+models = list()
+
+for (i in 3:12){
+  nn <- neuralnet(dd.nn.fmla
+                           , data=dd.train.scaled
+                           , hidden= i 
+                           , linear.output=TRUE)
+  models[[i]] <- nn
+}
+  
+```
+
+```{r}
+mse = list()
+for (i in 3:12) {
+ mse[i] <- (fitness.measures(dd.test.scaled, models[[i]], "Diff")[1] * ((max.diff-min.diff)**2))
+}
+
+mse[1] <- fitness.measures(dd.test.scaled, dd.nn.5.3, "Diff")[1] * ((max.diff-min.diff)**2)
+mse[2] <- fitness.measures(dd.test.scaled, rf.dd, "Diff")[1] * ((max.diff-min.diff)**2)
+
+mse
+
+
+```
+
+
+```{r}
+NeuralNetTools::garson(models[[10]])
+```
+```{r}
+NeuralNetTools::plotnet(models[[10]])
+
+```
+
+# Trip duration
+
+```{r}
+ggplot(merged)+
+  geom_point(aes(x=Checkout.Kiosk, y = Trip.Duration.Minutes ))+
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())
+```
+Some stations don't have long trips associated with them at all, while others have TONS of long trips associated with them.
+
+
+```{r}
+ggplot(merged)+
+  geom_point(aes(y=Membership.Type, x = Trip.Duration.Minutes ))+
+  geom_vline(xintercept = 60, color = "red")
+```
+
+Single trips run long the most often, but there a lot of late trips period.
+
+```{r}
+merged$late = ifelse(merged$Trip.Duration.Minutes > 60,1 ,0)
+```
+
+```{r}
+ggplot(merged)+
+  geom_bar(aes(y = Membership.Type,fill = factor(late)))
+```
+
+```{r}
+ggplot(merged)+
+  geom_bar(aes(x = Checkout.Kiosk,fill = factor(late)))+
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())
+```
+```{r}
+head(merged)
+```
+
+```{r}
+temp_merged = merged#[year(merged$Checkout.Date)>2018,]
+temp_merged$Checkout.Kiosk = factor(temp_merged$Checkout.Kiosk)
+temp_merged$hour = hour(temp_merged$Checkout.Time)
+temp_merged$Membership.Type = factor(temp_merged$Membership.Type)
+```
+
+
+```{r}
+set.seed(123)
+train = sample (1:nrow(temp_merged), nrow(temp_merged)/2)
+```
+
+```{r}
+set.seed(12)
+boost.merged=gbm(Trip.Duration.Minutes~Membership.Type+hour + Checkout.Kiosk+AvgTemp,data=temp_merged[train ,], distribution="gaussian",n.trees=500, shrinkage = .1)
+```
+
+```{r}
+summary(boost.merged)
+```
+
+
+```{r}
+gbm.perf(boost.merged, method = "OOB")
+```
+
+```{r}
+pred = predict.gbm(object = boost.merged,newdata = temp_merged[-train,], n.trees = 34)
+```
+
+
+```{r}
+mean((pred - temp_merged$Trip.Duration.Minutes[-train])^2)
+```
+
+
+```{r}
+ggplot()+
+  geom_point(aes(x=temp_merged$Trip.Duration.Minutes[-train], y = pred))+
+  geom_abline()
+```
+```{r}
+head(temp_merged)
+```
+
+
+```{r}
+boost.merged=gbm(late~Membership.Type+hour + Checkout.Kiosk+AvgTemp,data=temp_merged[train ,], distribution="bernoulli",n.trees=500, shrinkage = .1)
+```
+
+```{r}
+summary(boost.merged)
+```
+
+
+```{r}
+prob = predict(boost.merged, newdata = temp_merged[-train ,], type = "response")
+yhat = ifelse(prob >.5,1,0)
+sum(yhat)
+```
+
+```{r}
+hist(prob)
+```
+
+
+```{r}
+yhat = ifelse(prob >.5,1,0)
+cm = t(table(yhat, temp_merged$late[-train]))
+cm
+```
+```{r}
+sum(diag(cm))/sum(cm) #Accuracy
+cm[1,1]/sum(cm[1, c(1,2)]) #Correct rate of negative predicted values
+cm[2,2]/sum(cm[2, c(1,2)]) #Correct rate of positive predicted value
+```
+```{r}
+yhat = ifelse(prob >.15,1,0)
+cm = t(table(yhat, temp_merged$late[-train]))
+cm
+```
+
+```{r}
+sum(diag(cm))/sum(cm) #Accuracy
+cm[1,1]/sum(cm[1, c(1,2)]) #Correct rate of negative predicted values
+cm[2,2]/sum(cm[2, c(1,2)]) #Correct rate of positive predicted value
+
+```
+
+```{r}
+
+```
+
+
+
+
+
